@@ -1188,9 +1188,13 @@ impl Server {
 		let sub = self.db.read(async |t| t.get_htlc_subscription_by_payment_hash(payment_hash).await).await?
 			.not_found([payment_hash], "no pending payment with this payment hash")?;
 
-		let is_self_payment = self.db.read(async |t|
+		// In payout mode an attempt that succeeded before a restart still
+		// makes the receive an intra-Ark payment.
+		let is_self_payment = self.db.read(async |t| if self.config.expiry_payouts {
+			t.get_lightning_payment_attempt_by_subscription_id(sub.id).await
+		} else {
 			t.get_open_lightning_payment_attempt_by_subscription_id(sub.id).await
-		).await?.is_some();
+		}).await?.is_some();
 
 		match sub.status {
 			// Cosigning releases the granted HTLC-recv VTXOs; that is only safe

@@ -725,19 +725,33 @@ impl LightningManager {
 		// If an open self-payment attempt exists for the payment hash, it is an
 		// intra-Ark lightning payment so we can mark it as succeeded,
 		// then skip hold invoice settlement.
-		let attempt = self.db.read(async |t| t.get_open_lightning_payment_attempt_by_payment_hash(payment_hash).await).await?
-			.filter(|attempt| attempt.is_self_payment());
+		let attempt = if self.db.expiry_payouts() {
+			// In payout mode the attempt is found by its link to the
+			// subscription, open or not: after a restart between the
+			// attempt's success and the receive's settlement it is already
+			// Succeeded, and its hold invoice was canceled when the receive
+			// was accepted.
+			self.db.read(async |t|
+				t.get_lightning_payment_attempt_by_subscription_id(subscription_id).await
+			).await?
+		} else {
+			self.db.read(async |t| t.get_open_lightning_payment_attempt_by_payment_hash(payment_hash).await).await?
+				.filter(|attempt| attempt.is_self_payment())
+		};
 		let is_self_payment = attempt.is_some();
 		if let Some(attempt) = attempt {
 			// NB: the xpay reconciliation loop may also post the mailbox notification
 			// for the same payment hash. The DB insert is idempotent (ON CONFLICT DO NOTHING).
-			self.payment_handler().process_payment_attempt(
-				&self.settler, &attempt,
-				LightningPaymentStatus::Succeeded,
-				None,
-				None,
-				Some(preimage),
-			).await?;
+			// Only payout mode finds an attempt that already succeeded.
+			if attempt.status != LightningPaymentStatus::Succeeded {
+				self.payment_handler().process_payment_attempt(
+					&self.settler, &attempt,
+					LightningPaymentStatus::Succeeded,
+					None,
+					None,
+					Some(preimage),
+				).await?;
+			}
 		} else {
 			// Settle the hold invoice on the node that created the
 			// subscription - that's where the HTLCs are locked. The user has
