@@ -1174,7 +1174,7 @@ impl Server {
 			.not_found([payment_hash], "no pending payment with this payment hash")?;
 
 		let is_self_payment = self.db.read(async |t|
-			t.get_open_lightning_payment_attempt_by_subscription_id(sub.id).await
+			t.get_lightning_payment_attempt_by_subscription_id(sub.id).await
 		).await?.is_some();
 
 		match sub.status {
