@@ -798,7 +798,9 @@ impl Server {
 	/// Ark address in its route hints, which settles the receive.
 	///
 	/// Afterwards the invoice cannot be paid, as after a payment over
-	/// lightning.
+	/// lightning. A retry of the arkoor that settled the receive is
+	/// co-signed again and changes nothing. Any other request for a receive
+	/// that is not open is refused.
 	#[tracing::instrument(skip(self, request))]
 	pub(crate) async fn cosign_lightning_receive_arkoor(
 		&self,
@@ -816,10 +818,11 @@ impl Server {
 		let sub = self.db.read(async |t| t.get_htlc_subscription_by_payment_hash(payment_hash).await).await?
 			.not_found([payment_hash], "no pending payment with this payment hash")?;
 		let claim_pubkey = sub.claim_pubkey.badarg("invoice has no Ark address")?;
-		// A retry of the arkoor that settled the receive is co-signed again.
-		if sub.status == LightningHtlcSubscriptionStatus::Created && sub.invoice.is_expired() {
-			return badarg!("invoice is not payable");
-		}
+		let retry = match sub.status {
+			LightningHtlcSubscriptionStatus::Created if !sub.invoice.is_expired() => false,
+			LightningHtlcSubscriptionStatus::Settled => true,
+			_ => return badarg!("invoice is not payable"),
+		};
 
 		let policy = VtxoPolicy::new_pubkey(claim_pubkey);
 		let paid = request.all_outputs()
@@ -830,6 +833,18 @@ impl Server {
 			return badarg!("arkoor pays {} of the {} invoice", paid, sub.amount());
 		}
 
+		if retry {
+			let inputs = request.inputs().copied().collect::<Vec<_>>();
+			let settled_by = self.db.read(async |t|
+				t.lightning_receive_settled_by_arkoor(sub.id, &inputs).await
+			).await?;
+			if !settled_by {
+				return badarg!("invoice is not payable");
+			}
+			return self.cosign_oor(request, None).await;
+		}
+
+		// The co-sign settles the receive in this call, or it fails.
 		let response = self.cosign_oor(request, Some(&sub)).await?;
 
 		self.lightning_manager.finish_intra_ark_payment(sub).await;
