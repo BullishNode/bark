@@ -275,8 +275,9 @@ pub enum Progress {
 	/// movement is created. The preimage has NOT been revealed yet, so the
 	/// receive is still cancellable.
 	HtlcsReady(Htlcs),
-	/// The preimage has been revealed via the claim RPC in
-	/// exchange of pubkey VTXOs.
+	/// The claim RPC reveals the preimage to receive the pubkey VTXOs.
+	/// The wallet stores this state before it sends the claim, so a lost
+	/// reply or a stop of the process cannot hide the disclosure.
 	/// Past the point of no return — the receive can no longer be
 	/// cancelled. On failure we leave it pending rather than auto-exit;
 	/// the caller falls back to an on-chain exit via
@@ -756,6 +757,13 @@ async fn claim_lightning_receive_htlcs(
 	let PreparedClaim { mut srv, builder, package, keypairs } = claim;
 
 	info!("Claiming arkoor against payment preimage for {}", recv.payment_hash);
+	// The server can settle the payment before its reply arrives, so the
+	// disclosure must be stored before the request leaves.
+	let checkpoint = LightningReceive {
+		progress: Progress::PreimageRevealed(htlcs.clone()),
+		..recv.clone()
+	};
+	wallet.inner.db.upsert_wallet_action_checkpoint(&recv.id(), &checkpoint.into()).await.retry()?;
 	let resp = srv.client.claim_lightning_receive(protos::ClaimLightningReceiveRequest {
 		payment_hash: recv.payment_hash.to_byte_array().to_vec(),
 		payment_preimage: recv.payment_preimage.to_vec(),
