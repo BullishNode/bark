@@ -1,0 +1,13 @@
+- Add expiry payouts, off by default with `expiry_payouts`
+  In expiry payout mode the server records an owner mailbox key `M` for
+  every VTXO, and the watchman pays the VTXOs of an expired tree to
+  `tr(M)` instead of to the operator. The fee is the higher of 2,000 sats
+  and 1% of the value of the owner in the tree, once for each owner in each
+  tree. The mode is fixed when the database is created. Without it, the
+  server behaves as upstream. See `docs/expiry-payouts.md`.
+  [#1](https://github.com/SatoshiPortal/scuttle/pull/1)
+  - `watchman.expiry_payout_max_fee_rate` caps the feerate of a payout
+    transaction and of its replacements.
+  - `ln_receive_ark_address_hints` lets a receiver put its Ark address in
+    the route hints of an invoice, so a payer on this server pays the invoice
+    with an arkoor.
