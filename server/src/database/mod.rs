@@ -500,6 +500,8 @@ impl<'t> Tx<'t> {
 			return Ok(None);
 		}
 
+		self.check_owner_mailbox(mailbox_id, &vtxos.iter().map(|vtxo| vtxo.id()).collect::<Vec<_>>()).await?;
+
 		// Acquire advisory lock to serialize all mailbox writes.
 		// This prevents race conditions where checkpoints could be committed out of order.
 		// Lock is automatically released when transaction commits/rolls back.
@@ -864,6 +866,7 @@ impl<'t> Tx<'t> {
 		if vtxo_ids.is_empty() {
 			return Ok(None);
 		}
+		self.check_no_other_owner_mailbox(mailbox_id, vtxo_ids).await?;
 
 		// Acquire advisory lock to serialize all mailbox writes.
 		// This prevents race conditions where checkpoints could be committed out of order.

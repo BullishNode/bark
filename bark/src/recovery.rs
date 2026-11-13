@@ -463,7 +463,16 @@ impl Wallet {
 		// The server is the authority on whether a vtxo was spent elsewhere,
 		// and recovery has nothing else to go on.
 		let queries = owned.iter().map(|(vtxo, keypair)| (vtxo.id(), keypair)).collect::<Vec<_>>();
-		let states = self.fetch_vtxo_spend_states(&queries).await?;
+		let (states, foreign) = self.fetch_own_vtxo_spend_states(&queries).await?;
+		// A VTXO whose owner mailbox is another wallet's is not ours.
+		owned.retain(|(vtxo, _)| {
+			if !foreign.contains(&vtxo.id()) {
+				return true;
+			}
+			warn!("Recovery vtxo {} has the owner mailbox of another wallet", vtxo.id());
+			report.push_foreign(vtxo);
+			false
+		});
 
 		let vtxos = owned.into_iter().map(|(vtxo, _)| {
 			// The fetch logged why an answer is missing.
@@ -620,6 +629,7 @@ impl Wallet {
 	async fn recover_from_xpub(&self, report: &mut RecoveryReport) -> anyhow::Result<bool> {
 		let (mut srv, ark_info) = self.require_server().await?;
 		let xpub = self.vtxo_xpub().encode().to_vec();
+		let payouts = srv.expiry_payouts().await;
 
 		let mut start_index = 0u32;
 		let mut cursor_vtxo_id = None;
@@ -673,6 +683,12 @@ impl Wallet {
 				}
 				max_index = max_index.max(Some(index));
 
+				// A VTXO whose owner mailbox is another wallet's is not ours.
+				if payouts && entry.owner_mailbox != self.mailbox_keypair().public_key().serialize() {
+					warn!("Recovery vtxo {} has the owner mailbox of another wallet", vtxo.id());
+					report.push_foreign(&vtxo);
+					continue;
+				}
 				let adoption = VtxoSpendState::try_from(entry.spend_state)
 					.map_err(|_| anyhow::anyhow!(
 						"server returned unknown spend state {}; this wallet may need updating",
