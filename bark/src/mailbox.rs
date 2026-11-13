@@ -53,7 +53,7 @@ use crate::utils::ReconnectBackoff;
 /// consumers. The VTXO row is `INSERT OR IGNORE`, so once one consumer has
 /// stored the package the rest see the VTXO already present and skip the
 /// movement.
-const MAILBOX_PROCESSING_LOCK_KEY: &str = "mailbox.processing";
+pub(crate) const MAILBOX_PROCESSING_LOCK_KEY: &str = "mailbox.processing";
 
 /// How long a consumer waits for the arkoor dedup lock before giving up.
 ///
@@ -64,7 +64,7 @@ const MAILBOX_PROCESSING_LOCK_KEY: &str = "mailbox.processing";
 /// [`Wallet::process_mailbox_message`]) so a later message can't bury it. A
 /// timeout only happens if a holder is stuck for the full duration; normally
 /// waiters acquire the lock and dedup as usual.
-const MAILBOX_PROCESSING_LOCK_TIMEOUT: std::time::Duration =
+pub(crate) const MAILBOX_PROCESSING_LOCK_TIMEOUT: std::time::Duration =
 	std::time::Duration::from_secs(30);
 
 /// How long the handler of a lightning send notification waits for a drive
@@ -333,6 +333,7 @@ impl Wallet {
 				break;
 			}
 		}
+		self.credit_pending_arkoor_receives().await?;
 
 		Ok(())
 	}
@@ -524,6 +525,10 @@ impl Wallet {
 			warn!("Failed to register received arkoor vtxo transactions with server: {:#}", e);
 		}
 
+		let new_vtxos = self.verify_received_arkoor_vtxos(new_vtxos).await?;
+		if new_vtxos.is_empty() {
+			return Ok(());
+		}
 		self.credit_received_arkoor_vtxos(&new_vtxos).await
 	}
 

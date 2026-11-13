@@ -48,6 +48,7 @@ use crate::database::ln::{
 	LightningHtlcSubscription, LightningHtlcSubscriptionStatus, LightningPaymentStatus,
 };
 use crate::error::ContextExt;
+use crate::owner_mailbox::DestinationBindings;
 use crate::{check_max_amount, telemetry, Server, CAPTAIND_API_KEY};
 
 
@@ -200,10 +201,11 @@ fn validate_receive_claim(
 }
 
 impl Server {
-	#[tracing::instrument(skip(self, request))]
+	#[tracing::instrument(skip(self, request, destinations))]
 	pub async fn request_lightning_pay_htlc_cosign(
 		&self,
 		request: ArkoorPackageCosignRequest<VtxoId>,
+		destinations: &DestinationBindings,
 	) -> anyhow::Result<ArkoorPackageCosignResponse> {
 		let input_vtxo_ids = request.inputs().cloned().collect::<Vec<VtxoId>>();
 
@@ -303,7 +305,7 @@ impl Server {
 
 		slog!(LightningPayHtlcsRequested, payment_hash, expiry);
 
-		let (builder, _) = self.cosign_oor_with_builder(builder, None).await?;
+		let (builder, _) = self.cosign_oor_with_builder(builder, destinations, None).await?;
 		Ok(builder.cosign_response())
 	}
 
@@ -483,6 +485,7 @@ impl Server {
 	pub async fn revoke_lightning_pay_htlcs(
 		&self,
 		cosign_request: ArkoorPackageCosignRequest<VtxoId>,
+		destinations: &DestinationBindings,
 	) -> anyhow::Result<ArkoorPackageCosignResponse> {
 		let tip = self.chain_tip().height as BlockHeight;
 		let db = self.db.clone();
@@ -558,11 +561,13 @@ impl Server {
 		// Output user vtxos from the revoke cosign go in as `unregistered`,
 		// matching the arkoor cosign path. They flip to spendable once the
 		// caller uploads the signed chain via register_vtxo_transactions.
+		let bindings = destinations.bindings_for_package(&builder, self.config.expiry_payouts)?;
 		let update = VtxoTreeUpdate::new()
 			.upsert_unsigned_tx(builder.virtual_transactions())
 			.insert_oor_spent_vtxos(builder.build_unsigned_internal_vtxos())
 			.insert_unregistered_vtxos(builder.build_unsigned_vtxos().map(ServerVtxo::from))
-			.mark_vtxos_oor_spent(builder.input_spend_info());
+			.mark_vtxos_oor_spent(builder.input_spend_info())
+			.bind_owner_mailboxes(bindings)?;
 		self.db.write(async |t| {
 			// Re-check the settlement inside the write tx: the early gate and
 			// the eligibility read above both run in their own (read)
@@ -801,11 +806,12 @@ impl Server {
 	/// lightning. A retry of the arkoor that settled the receive is
 	/// co-signed again and changes nothing. Any other request for a receive
 	/// that is not open is refused.
-	#[tracing::instrument(skip(self, request))]
+	#[tracing::instrument(skip(self, request, destinations))]
 	pub(crate) async fn cosign_lightning_receive_arkoor(
 		&self,
 		payment_hash: PaymentHash,
 		request: ArkoorPackageCosignRequest<VtxoId>,
+		destinations: &DestinationBindings,
 	) -> anyhow::Result<ArkoorPackageCosignResponse> {
 		if !self.config.ln_receive_ark_address_hints {
 			return badarg!("paying invoices by arkoor is disabled on this server");
@@ -841,11 +847,11 @@ impl Server {
 			if !settled_by {
 				return badarg!("invoice is not payable");
 			}
-			return self.cosign_oor(request, None).await;
+			return self.cosign_oor(request, destinations, None).await;
 		}
 
 		// The co-sign settles the receive in this call, or it fails.
-		let response = self.cosign_oor(request, Some(&sub)).await?;
+		let response = self.cosign_oor(request, destinations, Some(&sub)).await?;
 
 		self.lightning_manager.finish_intra_ark_payment(sub).await;
 
@@ -1118,13 +1124,14 @@ impl Server {
 		badarg!("this feature has been disabled by the server")
 	}
 
-	#[tracing::instrument(skip(self, payment_preimage, cosign_request))]
+	#[tracing::instrument(skip(self, payment_preimage, cosign_request, destinations))]
 	pub async fn claim_lightning_receive(
 		&self,
 		payment_hash: PaymentHash,
 		payment_preimage: Preimage,
 		cosign_request: ArkoorPackageCosignRequest<VtxoId>,
 		pver: u64,
+		destinations: &DestinationBindings,
 	) -> anyhow::Result<ArkoorPackageCosignResponse> {
 		// Held for the whole call, so no other call decides on this payment
 		// while the claim is validated, settled and cosigned.
@@ -1229,7 +1236,7 @@ impl Server {
 				.context("could not settle hold invoice, refusing to release the claim")?;
 		}
 
-		let (builder, _) = self.cosign_oor_with_builder(builder, None).await?;
+		let (builder, _) = self.cosign_oor_with_builder(builder, destinations, None).await?;
 		let vtxo_request = VtxoRequest {
 			amount: sub.amount(),
 			policy: vtxo_policy,
