@@ -875,6 +875,17 @@ impl Server {
 			return badarg!("arkoor pays {} of the {} invoice", paid, sub.amount());
 		}
 
+		if self.config.expiry_payouts {
+			// The payer could bind the VTXO to another mailbox than the
+			// one the receive was started for.
+			let mailbox_id = self.db.read(async |t|
+				t.get_lightning_receiver_mailbox_id(payment_hash).await
+			).await?;
+			if destinations.mailbox_for(claim_pubkey) != mailbox_id.map(|m| m.as_pubkey()) {
+				return badarg!("arkoor doesn't pay the mailbox of the invoice");
+			}
+		}
+
 		let response = self.cosign_oor(request, destinations, Some(&sub)).await?;
 
 		self.lightning_manager.finish_intra_ark_payment(sub).await;
