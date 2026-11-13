@@ -1,6 +1,6 @@
 [package]
 name = "bark-json"
-version = "0.8.1" # lock to bark-wallet version
+version = "0.8.1+scuttle.1" # lock to bark-wallet version
 license = "MIT"
 authors = [ "Team Second <hello@second.tech>" ]
 description = "JSON definitions for the bark APIs"
