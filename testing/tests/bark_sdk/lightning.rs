@@ -494,11 +494,14 @@ async fn pay_with_retry_for() {
 /// A server that lets users put their Ark address in invoices, and two
 /// wallets on it that use it.
 async fn ark_address_hint_setup(
-	ctx: &TestContext,
+	ctx: &TestContext, expiry_payouts: bool,
 ) -> (LightningPaymentSetup, Arc<Captaind>, bark::Wallet, bark::Wallet) {
 	let lightning = ctx.new_lightning_setup("lightningd").await;
 	let srv = ctx.captaind("server").lightningd(&lightning.internal).funded(btc(10))
-		.cfg(|cfg| cfg.ln_receive_ark_address_hints = true)
+		.cfg(move |cfg| {
+			cfg.ln_receive_ark_address_hints = true;
+			cfg.expiry_payouts = expiry_payouts;
+		})
 		.create().await;
 	srv.wait_for_vtxopool(ctx).await;
 	let payer = ctx.bark_sdk("payer", &srv).boarded(sat(400_000))
@@ -530,7 +533,7 @@ async fn server_receive_status(
 #[tokio::test]
 async fn pay_invoice_on_its_ark_address() {
 	let ctx = TestContext::new("bark_sdk/pay_invoice_on_its_ark_address").await;
-	let (lightning, srv, payer, receiver) = ark_address_hint_setup(&ctx).await;
+	let (lightning, srv, payer, receiver) = ark_address_hint_setup(&ctx, false).await;
 
 	let amount = sat(100_000);
 	let invoice = receiver.bolt11_invoice(amount, None, None).await.unwrap();
@@ -577,7 +580,7 @@ async fn pay_invoice_on_its_ark_address() {
 #[tokio::test]
 async fn external_payer_pays_invoice_with_ark_address() {
 	let ctx = TestContext::new("bark_sdk/external_payer_pays_invoice_with_ark_address").await;
-	let (lightning, _srv, _payer, receiver) = ark_address_hint_setup(&ctx).await;
+	let (lightning, _srv, _payer, receiver) = ark_address_hint_setup(&ctx, false).await;
 
 	let amount = sat(100_000);
 	let invoice = receiver.bolt11_invoice(amount, None, None).await.unwrap();
@@ -598,7 +601,7 @@ async fn external_payer_pays_invoice_with_ark_address() {
 #[tokio::test]
 async fn ark_address_hints_are_opt_in() {
 	let ctx = TestContext::new("bark_sdk/ark_address_hints_are_opt_in").await;
-	let (_lightning, srv, _payer, receiver) = ark_address_hint_setup(&ctx).await;
+	let (_lightning, srv, _payer, receiver) = ark_address_hint_setup(&ctx, false).await;
 
 	let other = ctx.bark_sdk("other", &srv).boarded(sat(400_000)).create().await;
 	let invoice = other.bolt11_invoice(sat(10_000), None, None).await.unwrap();
@@ -616,6 +619,25 @@ async fn ark_address_hints_are_opt_in() {
 	paid.unwrap();
 	assert!(matches!(claimed.unwrap(), LightningReceiveState::Settled(_)));
 	assert!(matches!(other.lightning_send_state(hash).await.unwrap(), LightningSendState::Paid(_)));
+}
+
+/// An invoice paid on its Ark address in payout mode binds the VTXO the
+/// receiver gets to the receiver's mailbox.
+#[tokio::test]
+async fn ark_address_payment_binds_the_receivers_mailbox() {
+	let ctx = TestContext::new("bark_sdk/ark_address_payment_binds_the_receivers_mailbox").await;
+	let (_lightning, srv, payer, receiver) = ark_address_hint_setup(&ctx, true).await;
+	let invoice = receiver.bolt11_invoice(sat(50_000), None, None).await.unwrap();
+	assert!(invoice.ark_address().is_some());
+	let hash = PaymentHash::from(&invoice);
+	payer.pay_lightning_invoice(invoice, None, true).await.unwrap();
+	receiver.sync().await;
+	assert!(matches!(receiver.lightning_receive_state(hash).await.unwrap(), LightningReceiveState::Settled(_)));
+	let ids = receiver.spendable_vtxos().await.unwrap().iter().map(|vtxo| vtxo.id()).collect::<Vec<_>>();
+	assert!(!ids.is_empty());
+	let db = Db::connect(&srv.config().postgres).await.unwrap();
+	let owners = db.read(async |t| t.vtxo_owner_mailboxes(&ids).await).await.unwrap();
+	assert!(ids.iter().all(|id| owners.get(id) == Some(&receiver.mailbox_identifier().as_pubkey())));
 }
 
 /// Holds the reply to the first receive claim forever, after the server
