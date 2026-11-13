@@ -1,6 +1,7 @@
+
 use bitcoin::Amount;
 use bitcoin::secp256k1::Keypair;
-use bitcoin_ext::BlockHeight;
+use bitcoin_ext::{BlockDelta, BlockHeight};
 
 use futures::StreamExt;
 
@@ -9,6 +10,7 @@ use ark::{
 };
 use ark::arkoor::package::ArkoorPackageBuilder;
 use ark::attestations::DelegatedRoundParticipationAttestation;
+use ark::lightning::PaymentHash;
 use ark::mailbox::{MailboxIdentifier, MailboxType};
 use ark::rounds::{RoundAttemptAttestation, RoundEvent};
 use ark::test_util::dummy::DummyTestVtxoSpec;
@@ -26,7 +28,48 @@ use ark_testing::exit::complete_exit;
 use ark_testing::util::FutureExt;
 
 use crate::registration::DropRegistration;
-use super::{bind_outputs, blinded_mailbox, full_vtxos};
+use super::{bind_outputs, bind_to_wallets, blinded_mailbox, decide_for_payout, full_vtxos};
+
+/// A new Lightning spend of an expired VTXO and any spend of a VTXO decided
+/// for a payout are refused with a reason the client can read.
+#[tokio::test]
+async fn expiry_payout_refusals_carry_a_reason() {
+	let ctx = TestContext::new("server/expiry_payout_refusals_carry_a_reason").await;
+	let srv = ctx.captaind("server").no_vtxo_pool()
+		.cfg(|cfg| { cfg.expiry_payouts = true; cfg.vtxo_lifetime = BlockDelta::new(24); }).create().await;
+	let wallet = ctx.bark_sdk("sender", &srv).boarded(sat(100_000))
+		.cfg(|cfg| cfg.daemon_manual_sync = true).create().await;
+	let source = wallet.spendable_vtxos().await.unwrap().pop().unwrap();
+	let source = wallet.get_full_vtxo(source.id()).await.unwrap();
+	let key = wallet.get_vtxo_key(&source).await.unwrap();
+	let tip = ctx.bitcoind().get_block_count().await as u32;
+	let expired = ctx.generate_blocks(source.expiry_height().to_u32() + 1 - tip).await;
+	srv.wait_for_sync_height(expired).await;
+	let request = async || {
+		let deadline = expired + srv.config().htlc_send_expiry_delta + BlockDelta::new(1);
+		let policy = VtxoPolicy::new_server_htlc_send(key.public_key(), PaymentHash::from([7; 32]), deadline);
+		let builder = ArkoorPackageBuilder::new_claim_all_with_checkpoints([source.clone()], policy).unwrap()
+			.generate_user_nonces(&[key]).unwrap();
+		let package = bind_to_wallets(&srv, &[&wallet], builder.cosign_request().into()).await;
+		protos::LightningPayHtlcCosignRequest { parts: package.parts }
+	};
+	let reason = |error: tonic::Status| {
+		error.metadata().get("expiry-payout-reason").unwrap().to_str().unwrap().to_owned()
+	};
+	let mut rpc = srv.get_public_rpc().await;
+	let error = rpc.request_lightning_pay_htlc_cosign(request().await).await.unwrap_err();
+	assert_eq!(reason(error), "expired_new_lightning");
+
+	let db = Db::connect(&srv.config().postgres).await.unwrap();
+	db.write(async |t| {
+		decide_for_payout(t, &[source.id().to_string()]).await?;
+		t.execute("UPDATE vtxo SET spend_state = 'spent', updated_at = NOW() WHERE vtxo_id = $1",
+			&[&source.id().to_string()]).await?;
+		Ok(())
+	}).await.unwrap();
+	let error = rpc.request_lightning_pay_htlc_cosign(request().await).await.unwrap_err();
+	assert_eq!(reason(error), "decided_for_payout");
+}
 
 /// The `vtxo` rows of `ids` and every owner binding, to check that a
 /// request wrote nothing.
